@@ -11,72 +11,61 @@ on:
         required: false
         default: ""
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-24.04
+    outputs:
+      caddy_version: ${{ steps.version.outputs.caddy_version }}
+      tags: ${{ steps.tags.outputs.tags }}
+
+    steps:
+      - name: Determine Caddy version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.caddy_version }}" ]; then
+            echo "caddy_version=${{ github.event.inputs.caddy_version }}" >> "$GITHUB_OUTPUT"
+          else
+            VERSION=$(curl -s https://api.github.com/repos/caddyserver/caddy/releases/latest | jq -r '.tag_name' | sed 's/^v//')
+            echo "caddy_version=$VERSION" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compute tags
+        id: tags
+        env:
+          REGISTRY: ghcr.io
+          IMAGE_NAME: ${{ github.repository }}
+        run: |
+          VERSION="${{ steps.version.outputs.caddy_version }}"
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f1-2)
+
+          TAGS="${REGISTRY}/${IMAGE_NAME}:${VERSION}"
+          TAGS="${TAGS}
+          ${REGISTRY}/${IMAGE_NAME}:${MINOR}"
+          TAGS="${TAGS}
+          ${REGISTRY}/${IMAGE_NAME}:${MAJOR}"
+
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            TAGS="${TAGS}
+          ${REGISTRY}/${IMAGE_NAME}:latest"
+          fi
+
+          echo "tags<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$TAGS" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
   build:
-    runs-on: ubuntu-latest
+    name: Build
+    needs: prepare
+    uses: ./.github/workflows/build-image.yml
+    with:
+      caddy_version: ${{ needs.prepare.outputs.caddy_version }}
+      tags: ${{ needs.prepare.outputs.tags }}
     permissions:
       contents: read
       packages: write
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Determine Caddy version
-        id: caddy
-        run: |
-          if [ -n "${{ github.event.inputs.caddy_version }}" ]; then
-            echo "version=${{ github.event.inputs.caddy_version }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=2.10.2" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=${{ steps.caddy.outputs.version }},enable={{is_default_branch}}
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            CADDY_VERSION=${{ steps.caddy.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.caddy.outputs.version }}
-          format: table
-          exit-code: 0
-          severity: CRITICAL,HIGH
