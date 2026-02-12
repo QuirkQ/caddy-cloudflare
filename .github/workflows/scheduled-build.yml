@@ -1,0 +1,128 @@
+name: Scheduled Build
+
+on:
+  schedule:
+    - cron: "0 2 * * 0,3" # Sundays and Wednesdays at 2 AM UTC
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  detect-versions:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.versions.outputs.matrix }}
+      has_new: ${{ steps.versions.outputs.has_new }}
+    permissions:
+      packages: read
+
+    steps:
+      - name: Fetch latest Caddy versions
+        id: versions
+        run: |
+          # Fetch releases from GitHub API
+          RELEASES=$(curl -s https://api.github.com/repos/caddyserver/caddy/releases)
+
+          # Get latest stable release (non-prerelease, non-draft)
+          LATEST=$(echo "$RELEASES" | jq -r '
+            [.[] | select(.prerelease == false and .draft == false)] |
+            sort_by(.published_at) | reverse |
+            .[0].tag_name' | sed 's/^v//')
+
+          # Parse version components
+          MAJOR=$(echo "$LATEST" | cut -d. -f1)
+          MINOR=$(echo "$LATEST" | cut -d. -f1-2)
+          PATCH=$LATEST
+
+          echo "Latest Caddy: $PATCH (major=$MAJOR, minor=$MINOR)"
+
+          # Check if image already exists in registry
+          HAS_NEW="false"
+          TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:${IMAGE_NAME}:pull" | jq -r '.token // empty')
+
+          if [ -n "$TOKEN" ]; then
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              -H "Authorization: Bearer $TOKEN" \
+              "https://ghcr.io/v2/${IMAGE_NAME}/manifests/${PATCH}")
+
+            if [ "$STATUS" != "200" ]; then
+              HAS_NEW="true"
+              echo "New version detected: $PATCH"
+            else
+              echo "Version $PATCH already exists, skipping"
+            fi
+          else
+            # If we can't check, build anyway
+            HAS_NEW="true"
+            echo "Cannot check registry, building"
+          fi
+
+          echo "has_new=$HAS_NEW" >> "$GITHUB_OUTPUT"
+
+          # Build matrix with version info
+          MATRIX=$(jq -n \
+            --arg patch "$PATCH" \
+            --arg minor "$MINOR" \
+            --arg major "$MAJOR" \
+            '{include: [{caddy_version: $patch, major: $major, minor: $minor}]}')
+
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: detect-versions
+    if: needs.detect-versions.outputs.has_new == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix: ${{ fromJson(needs.detect-versions.outputs.matrix) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.major }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.minor }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.caddy_version }}
+          labels: |
+            org.opencontainers.image.title=Caddy with Cloudflare DNS
+            org.opencontainers.image.description=Caddy ${{ matrix.caddy_version }} with Cloudflare DNS module
+            org.opencontainers.image.version=${{ matrix.caddy_version }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.licenses=Apache-2.0
+          build-args: |
+            CADDY_VERSION=${{ matrix.caddy_version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.caddy_version }}
+          format: table
+          exit-code: 0
+          severity: CRITICAL,HIGH

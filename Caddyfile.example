@@ -1,0 +1,23 @@
+# Example Caddyfile using Cloudflare DNS-01 challenge
+#
+# Set the CLOUDFLARE_API_TOKEN environment variable with a token that has
+# Zone:DNS:Edit permissions for your domain.
+
+{
+	# Use Cloudflare DNS for ACME challenges (required for wildcard certs
+	# or when ports 80/443 are not publicly accessible)
+	acme_dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+}
+
+example.com {
+	respond "Hello from Caddy with Cloudflare DNS!"
+}
+
+# Wildcard certificate example
+*.example.com {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
+
+	respond "Hello from {http.request.host}!"
+}
