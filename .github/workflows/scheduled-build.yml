@@ -26,6 +26,7 @@ jobs:
         env:
           IMAGE_NAME: ${{ github.repository }}
         run: |
+          IMAGE_NAME="${IMAGE_NAME,,}"
           # Get latest stable release
           VERSION=$(curl -s https://api.github.com/repos/caddyserver/caddy/releases/latest | jq -r '.tag_name' | sed 's/^v//')
           echo "Latest Caddy: $VERSION"

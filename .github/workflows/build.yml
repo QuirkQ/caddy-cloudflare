@@ -40,6 +40,7 @@ jobs:
           REGISTRY: ghcr.io
           IMAGE_NAME: ${{ github.repository }}
         run: |
+          IMAGE_NAME="${IMAGE_NAME,,}"
           VERSION="${{ steps.version.outputs.caddy_version }}"
           MAJOR=$(echo "$VERSION" | cut -d. -f1)
           MINOR=$(echo "$VERSION" | cut -d. -f1-2)
